@@ -88,7 +88,7 @@ namespace PersistentPotionBuff
             _itemIdToBuffNameMap[398] = "1012_Buff_InjectorMaxWeight";
             _itemIdToBuffNameMap[408] = "1072_Buff_ElecResistShort";
             _itemIdToBuffNameMap[409] = "1084_Buff_PainResistLong";
-            _itemIdToBuffNameMap[438] = "1092_Buff_Injector_HotBlood_Trigger"; // V3.6 修复: 使用 Trigger 版本
+            _itemIdToBuffNameMap[438] = "1092_Buff_Injector_HotBlood_Trigger";
             _itemIdToBuffNameMap[797] = "1013_Buff_InjectorArmor";
             _itemIdToBuffNameMap[798] = "1014_Buff_InjectorStamina";
             _itemIdToBuffNameMap[800] = "1015_Buff_InjectorMeleeDamage";
