@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Linq;
+using System.IO;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Duckov.Modding;
@@ -10,15 +11,39 @@ using Duckov.Buffs;
 using Duckov.Utilities;
 using ItemStatsSystem;
 using ItemStatsSystem.Items;
+using Newtonsoft.Json;
 
 namespace PersistentPotionBuff
 {
+    // 配置文件数据结构
+    [Serializable]
+    public class BuffMappingConfig
+    {
+        public List<BuffMappingEntry> mappings;
+        public ConfigSettings settings;
+    }
+
+    [Serializable]
+    public class BuffMappingEntry
+    {
+        public int itemId;
+        public int buffId;
+    }
+
+    [Serializable]
+    public class ConfigSettings
+    {
+        public int targetContainerId = 882;
+        public int requiredItemCount = 3;
+        public bool enableInBaseLevel = false;
+    }
+
     public class ModBehaviour : Duckov.Modding.ModBehaviour
     {
-        // 物品ID与Buff名称映射
-        private Dictionary<int, string> _itemIdToBuffNameMap = new Dictionary<int, string>();
-        // Buff名称到Buff对象缓存
-        private Dictionary<string, Buff> _buffPrefabCache = new Dictionary<string, Buff>();
+        // 物品ID与BuffID映射
+        private Dictionary<int, int> _itemIdToBuffIdMap = new Dictionary<int, int>();
+        // BuffID到Buff对象缓存
+        private Dictionary<int, Buff> _buffPrefabCache = new Dictionary<int, Buff>();
 
         // 已激活Buff ID
         private HashSet<int> activeModBuffIDs = new HashSet<int>();
@@ -30,6 +55,10 @@ namespace PersistentPotionBuff
 
         // Debug模式
         public static bool DebugMode = false;
+
+        // 配置
+        private ConfigSettings _settings = new ConfigSettings();
+        private string ConfigFilePath => Path.Combine(Application.dataPath, "..", "PersistentPotionBuff", "BuffMapping.json");
 
         private void Start()
         {
@@ -82,23 +111,133 @@ namespace PersistentPotionBuff
 
         private void InitializeBuffMap()
         {
-            _itemIdToBuffNameMap.Clear();
-            _itemIdToBuffNameMap[0] = "1201_Buff_NightVision";
-            _itemIdToBuffNameMap[137] = "1011_Buff_AddSpeed";
-            _itemIdToBuffNameMap[398] = "1012_Buff_InjectorMaxWeight";
-            _itemIdToBuffNameMap[408] = "1072_Buff_ElecResistShort";
-            _itemIdToBuffNameMap[409] = "1084_Buff_PainResistLong";
-            _itemIdToBuffNameMap[438] = "1092_Buff_Injector_HotBlood_Trigger";
-            _itemIdToBuffNameMap[797] = "1013_Buff_InjectorArmor";
-            _itemIdToBuffNameMap[798] = "1014_Buff_InjectorStamina";
-            _itemIdToBuffNameMap[800] = "1015_Buff_InjectorMeleeDamage";
-            _itemIdToBuffNameMap[872] = "1017_Buff_InjectorRecoilControl";
-            _itemIdToBuffNameMap[875] = "1018_Buff_HealForWhile";
-            _itemIdToBuffNameMap[856] = "1113_Buff_StormProtection1";
-            _itemIdToBuffNameMap[1070] = "1074_Buff_FireResistShort";
-            _itemIdToBuffNameMap[1071] = "1075_Buff_PoisonResistShort";
-            _itemIdToBuffNameMap[1072] = "1076_Buff_SpaceResistShort";
-            _itemIdToBuffNameMap[1247] = "1019_buff_Injector_BleedResist";
+            _itemIdToBuffIdMap.Clear();
+            
+            // 尝试从配置文件加载（如果不存在会自动生成默认配置）
+            if (LoadConfigFromFile())
+            {
+                Debug.Log($"[PersistentPotionBuff] 成功加载配置，共 {_itemIdToBuffIdMap.Count} 个映射");
+            }
+            else
+            {
+                // 如果加载失败（如解析错误等），使用默认配置
+                Debug.LogWarning("[PersistentPotionBuff] 配置文件加载失败，使用默认配置");
+                LoadDefaultConfig();
+            }
+        }
+
+        private bool LoadConfigFromFile()
+        {
+            try
+            {
+                if (!File.Exists(ConfigFilePath))
+                {
+                    Debug.LogWarning($"[PersistentPotionBuff] 配置文件不存在: {ConfigFilePath}");
+                    
+                    // 尝试从DLL所在目录复制模板文件
+                    if (CopyTemplateConfigFromDllDirectory())
+                    {
+                        Debug.Log("[PersistentPotionBuff] 已从DLL目录复制模板配置文件");
+                        // 复制成功后继续读取文件
+                    }
+                    else
+                    {
+                        // 如果模板文件不存在，返回false使用内存中的默认配置
+                        Debug.LogWarning("[PersistentPotionBuff] DLL目录下未找到模板文件，将使用内存中的默认配置");
+                        return false;
+                    }
+                }
+
+                string json = File.ReadAllText(ConfigFilePath);
+                BuffMappingConfig config = JsonConvert.DeserializeObject<BuffMappingConfig>(json);
+
+                if (config == null || config.mappings == null)
+                {
+                    Debug.LogError("[PersistentPotionBuff] 配置文件格式错误");
+                    return false;
+                }
+
+                // 加载映射
+                foreach (var entry in config.mappings)
+                {
+                    if (entry.buffId > 0)
+                    {
+                        _itemIdToBuffIdMap[entry.itemId] = entry.buffId;
+                    }
+                }
+
+                // 加载设置
+                if (config.settings != null)
+                {
+                    _settings = config.settings;
+                }
+
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[PersistentPotionBuff] 加载配置文件失败: {e.Message}");
+                return false;
+            }
+        }
+
+        private bool CopyTemplateConfigFromDllDirectory()
+        {
+            try
+            {
+                // 获取当前DLL的路径
+                string dllPath = Assembly.GetExecutingAssembly().Location;
+                string dllDirectory = Path.GetDirectoryName(dllPath);
+                string templatePath = Path.Combine(dllDirectory, "BuffMapping.json");
+
+                Debug.Log($"[PersistentPotionBuff] DLL路径: {dllPath}");
+                Debug.Log($"[PersistentPotionBuff] 模板文件路径: {templatePath}");
+
+                if (!File.Exists(templatePath))
+                {
+                    Debug.LogWarning($"[PersistentPotionBuff] 模板文件不存在: {templatePath}");
+                    return false;
+                }
+
+                // 确保目标目录存在
+                string targetDirectory = Path.GetDirectoryName(ConfigFilePath);
+                if (!Directory.Exists(targetDirectory))
+                {
+                    Directory.CreateDirectory(targetDirectory);
+                    Debug.Log($"[PersistentPotionBuff] 已创建目录: {targetDirectory}");
+                }
+
+                // 复制文件
+                File.Copy(templatePath, ConfigFilePath, false);
+                Debug.Log($"[PersistentPotionBuff] 已复制模板文件到: {ConfigFilePath}");
+                
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[PersistentPotionBuff] 复制模板文件失败: {e.Message}");
+                return false;
+            }
+        }
+
+        private void LoadDefaultConfig()
+        {
+            _itemIdToBuffIdMap[0] = 1201;      // 夜视
+            _itemIdToBuffIdMap[137] = 1011;    // 加速
+            _itemIdToBuffIdMap[398] = 1012;    // 负重
+            _itemIdToBuffIdMap[408] = 1072;    // 电抗
+            _itemIdToBuffIdMap[409] = 1084;    // 痛觉抗性
+            _itemIdToBuffIdMap[438] = 1092;    // 热血
+            _itemIdToBuffIdMap[797] = 1013;    // 护甲
+            _itemIdToBuffIdMap[798] = 1014;    // 耐力
+            _itemIdToBuffIdMap[800] = 1015;    // 近战伤害
+            _itemIdToBuffIdMap[872] = 1017;    // 后坐力控制
+            _itemIdToBuffIdMap[875] = 1018;    // 持续治疗
+            _itemIdToBuffIdMap[856] = 1113;    // 风暴保护
+            _itemIdToBuffIdMap[1070] = 1074;   // 火焰抗性
+            _itemIdToBuffIdMap[1071] = 1075;   // 毒抗
+            _itemIdToBuffIdMap[1072] = 1076;   // 空间抗性
+            _itemIdToBuffIdMap[1247] = 1019;   // 出血抗性
         }
 
         private void CacheBuffs()
@@ -109,16 +248,16 @@ namespace PersistentPotionBuff
                 _buffPrefabCache.Clear();
                 foreach (var buff in allBuffs)
                 {
-                    if (buff != null && !string.IsNullOrEmpty(buff.name))
+                    if (buff != null)
                     {
-                        _buffPrefabCache[buff.name] = buff;
+                        _buffPrefabCache[buff.ID] = buff;
                     }
                 }
-                // 已缓存 buff
+                Debug.Log($"[PersistentPotionBuff] 已缓存 {_buffPrefabCache.Count} 个Buff");
             }
             catch (Exception e)
             {
-                // 忽略缓存错误
+                Debug.LogError($"[PersistentPotionBuff] 缓存Buff失败: {e.Message}");
             }
         }
 
@@ -149,15 +288,15 @@ namespace PersistentPotionBuff
                 var buffManager = player != null ? player.GetBuffManager() : null;
                 if (buffManager != null)
                 {
-                    foreach (var kvp in _itemIdToBuffNameMap)
+                    foreach (var kvp in _itemIdToBuffIdMap)
                     {
-                        string buffName = kvp.Value;
-                        if (_buffPrefabCache.TryGetValue(buffName, out Buff buffPrefab))
+                        int buffId = kvp.Value;
+                        if (_buffPrefabCache.TryGetValue(buffId, out Buff buffPrefab))
                         {
                             if (buffManager.HasBuff(buffPrefab.ID))
                             {
                                 player.RemoveBuff(buffPrefab.ID, false);
-                                Log($"基地场景移除Buff:{buffName}");
+                                Log($"基地场景移除BuffID:{buffId}");
                             }
                         }
                     }
@@ -232,7 +371,7 @@ namespace PersistentPotionBuff
                 }
                 else 
                 {
-                    if (IsOrContainsTarget(item, 882))
+                    if (IsOrContainsTarget(item, _settings.targetContainerId))
                     {
                         isRelevant = true;
                     }
@@ -354,8 +493,8 @@ namespace PersistentPotionBuff
 
         private void UpdateBuffs()
         {
-            // 基地场景不生效
-            if (LevelConfig.IsBaseLevel)
+            // 基地场景不生效（除非配置允许）
+            if (LevelConfig.IsBaseLevel && !_settings.enableInBaseLevel)
             {
                 Log("基地场景，不进行Buff更新");
                 return;
@@ -399,14 +538,14 @@ namespace PersistentPotionBuff
                 }
             }
             // 应用或移除Buff
-            foreach (var kvp in _itemIdToBuffNameMap)
+            foreach (var kvp in _itemIdToBuffIdMap)
             {
                 int itemTypeID = kvp.Key;
-                string buffName = kvp.Value;
+                int buffId = kvp.Value;
                 int count = itemCounts.ContainsKey(itemTypeID) ? itemCounts[itemTypeID] : 0;
-                if (_buffPrefabCache.TryGetValue(buffName, out Buff buffPrefab))
+                if (_buffPrefabCache.TryGetValue(buffId, out Buff buffPrefab))
                 {
-                    if (count >= 3)
+                    if (count >= _settings.requiredItemCount)
                     {
                         // 应用Buff
                         player.AddBuff(buffPrefab, player);
@@ -464,7 +603,7 @@ namespace PersistentPotionBuff
         private HashSet<Item> GetAllTargetContainers()
         {
             HashSet<Item> result = new HashSet<Item>();
-            int targetContainerID = 882;
+            int targetContainerID = _settings.targetContainerId;
 
             // 检查人物背包
             if (CharacterMainControl.Main != null && CharacterMainControl.Main.CharacterItem != null)
