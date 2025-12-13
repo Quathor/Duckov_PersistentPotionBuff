@@ -62,7 +62,7 @@ namespace PersistentPotionBuff
 
         // 配置
         private ConfigSettings _settings = new ConfigSettings();
-        private string ConfigFilePath => Path.Combine(Application.dataPath, "..", "PersistentPotionBuff", "BuffMapping.json");
+        private string ConfigFilePath => Path.Combine(Application.dataPath, "Mods", "PersistentPotionBuff", "BuffMapping.json");
 
         private void Start()
         {
@@ -589,6 +589,21 @@ namespace PersistentPotionBuff
             CharacterBuffManager buffManager = player.GetBuffManager();
             if (buffManager == null) { Log("未找到Buff管理器"); return; }
             if (trackedContainers == null) trackedContainers = new HashSet<Item>();
+
+            // 预先清理Buff
+            List<int> expiredBuffs = new List<int>();
+            foreach (int bid in activeModBuffIDs)
+            {
+                if (!buffManager.HasBuff(bid))
+                {
+                    expiredBuffs.Add(bid);
+                }
+            }
+            foreach (int bid in expiredBuffs)
+            {
+                activeModBuffIDs.Remove(bid);
+            }
+
             // 统计所有容器物品
             Dictionary<int, int> itemCounts = new Dictionary<int, int>();
             foreach (var container in trackedContainers)
@@ -639,15 +654,33 @@ namespace PersistentPotionBuff
                     if (count >= _settings.requiredItemCount)
                     {
                         // 应用Buff
-                        player.AddBuff(buffPrefab, player);
+                        if (!buffManager.HasBuff(buffPrefab.ID))
+                        {
+                            player.AddBuff(buffPrefab, player);
+                        }
+                        
+                        // 标记Buff
+                        if (!activeModBuffIDs.Contains(buffPrefab.ID))
+                        {
+                            activeModBuffIDs.Add(buffPrefab.ID);
+                        }
+
                         SetBuffInfinite(buffManager.Buffs.FirstOrDefault(b=>b.ID==buffPrefab.ID));
                     }
                     else
                     {
+                        // 移除Buff
                         if (buffManager.HasBuff(buffPrefab.ID))
                         {
-                            // 移除Buff
-                            player.RemoveBuff(buffPrefab.ID, false);
+                            if (activeModBuffIDs.Contains(buffPrefab.ID))
+                            {
+                                player.RemoveBuff(buffPrefab.ID, false);
+                                activeModBuffIDs.Remove(buffPrefab.ID);
+                            }
+                        }
+                        else
+                        {
+                            activeModBuffIDs.Remove(buffPrefab.ID);
                         }
                     }
                 }
