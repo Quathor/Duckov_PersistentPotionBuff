@@ -48,6 +48,9 @@ namespace PersistentPotionBuff
 
         // 已激活Buff ID
         private HashSet<int> activeModBuffIDs = new HashSet<int>();
+        
+        // 保存Mod添加的Buff实例引用
+        private Dictionary<int, Buff> activeModBuffInstances = new Dictionary<int, Buff>();
 
         // 已订阅的Inventory
         private HashSet<Inventory> subscribedInventories = new HashSet<Inventory>();
@@ -62,7 +65,7 @@ namespace PersistentPotionBuff
 
         // 配置
         private ConfigSettings _settings = new ConfigSettings();
-        private string ConfigFilePath => Path.Combine(Application.dataPath, "Mods", "PersistentPotionBuff", "BuffMapping.json");
+        private string ConfigFilePath => Path.Combine(Application.dataPath, "..", "PersistentPotionBuff", "BuffMapping.json");
 
         private void Start()
         {
@@ -121,6 +124,8 @@ namespace PersistentPotionBuff
             }
             subscribedInventories.Clear();
             trackedContainers.Clear();
+            activeModBuffIDs.Clear();
+            activeModBuffInstances.Clear();
 
             // 解除额外槽位订阅
             foreach (var kvp in _trackedSlots)
@@ -304,26 +309,40 @@ namespace PersistentPotionBuff
         private void OnLevelInitialized()
         {
             Log("关卡初始化事件触发");
+            CacheBuffs();
             if (LevelConfig.IsBaseLevel)
             {
                 Log("当前为基地场景，Mod已禁用");
-                // 基地场景：移除所有由本mod添加的buff
+                // 基地场景：只移除由本mod添加的无限时长buff
                 CharacterMainControl player = CharacterMainControl.Main;
                 var buffManager = player != null ? player.GetBuffManager() : null;
                 if (buffManager != null)
                 {
-                    foreach (var kvp in _itemIdToBuffIdMap)
+                    foreach (var buffId in activeModBuffIDs.ToList())
                     {
-                        int buffId = kvp.Value;
-                        if (_buffPrefabCache.TryGetValue(buffId, out Buff buffPrefab))
+                        var currentBuff = buffManager.Buffs.FirstOrDefault(b => b.ID == buffId);
+                        if (currentBuff != null && IsBuffInfinite(currentBuff))
                         {
-                            if (buffManager.HasBuff(buffPrefab.ID))
+                            // 是无限时长的buff，移除它
+                            if (activeModBuffInstances.TryGetValue(buffId, out Buff buffInstance) && 
+                                buffInstance == currentBuff && 
+                                TryRemoveSpecificBuff(buffManager, buffInstance))
+                            {
+                                Log($"基地场景移除Mod Buff实例: {buffId}");
+                            }
+                            else if (_buffPrefabCache.TryGetValue(buffId, out Buff buffPrefab))
                             {
                                 player.RemoveBuff(buffPrefab.ID, false);
-                                Log($"基地场景移除BuffID:{buffId}");
+                                Log($"基地场景移除无限时长Buff: {buffId}");
                             }
                         }
+                        else
+                        {
+                            Log($"基地场景跳过有限时长Buff: {buffId}");
+                        }
                     }
+                    activeModBuffIDs.Clear();
+                    activeModBuffInstances.Clear();
                 }
                 ResetTrackingState();
                 return;
@@ -589,21 +608,6 @@ namespace PersistentPotionBuff
             CharacterBuffManager buffManager = player.GetBuffManager();
             if (buffManager == null) { Log("未找到Buff管理器"); return; }
             if (trackedContainers == null) trackedContainers = new HashSet<Item>();
-
-            // 预先清理Buff
-            List<int> expiredBuffs = new List<int>();
-            foreach (int bid in activeModBuffIDs)
-            {
-                if (!buffManager.HasBuff(bid))
-                {
-                    expiredBuffs.Add(bid);
-                }
-            }
-            foreach (int bid in expiredBuffs)
-            {
-                activeModBuffIDs.Remove(bid);
-            }
-
             // 统计所有容器物品
             Dictionary<int, int> itemCounts = new Dictionary<int, int>();
             foreach (var container in trackedContainers)
@@ -653,34 +657,80 @@ namespace PersistentPotionBuff
                 {
                     if (count >= _settings.requiredItemCount)
                     {
-                        // 应用Buff
-                        if (!buffManager.HasBuff(buffPrefab.ID))
+                        // 条件满足，需要添加buff
+                        if (!activeModBuffIDs.Contains(buffId))
                         {
+                            // 首次添加，添加buff并标记
                             player.AddBuff(buffPrefab, player);
+                            activeModBuffIDs.Add(buffId);
+                            
+                            // 保存实例引用
+                            var addedBuff = buffManager.Buffs.FirstOrDefault(b => b.ID == buffPrefab.ID);
+                            if (addedBuff != null)
+                            {
+                                activeModBuffInstances[buffId] = addedBuff;
+                            }
+                            Log($"添加Mod Buff: {buffId}");
                         }
-                        
-                        // 标记Buff
-                        if (!activeModBuffIDs.Contains(buffPrefab.ID))
+                        // 设置为无限时长
+                        if (activeModBuffInstances.TryGetValue(buffId, out Buff modBuff) && modBuff != null)
                         {
-                            activeModBuffIDs.Add(buffPrefab.ID);
+                            SetBuffInfinite(modBuff);
                         }
-
-                        SetBuffInfinite(buffManager.Buffs.FirstOrDefault(b=>b.ID==buffPrefab.ID));
                     }
                     else
                     {
-                        // 移除Buff
-                        if (buffManager.HasBuff(buffPrefab.ID))
+                        // 条件不满足，需要检查是否应该移除buff
+                        if (activeModBuffIDs.Contains(buffId))
                         {
-                            if (activeModBuffIDs.Contains(buffPrefab.ID))
+                            // 首先检查当前的buff是否为无限时长（由mod添加）
+                            var currentBuff = buffManager.Buffs.FirstOrDefault(b => b.ID == buffId);
+                            
+                            if (currentBuff != null)
                             {
-                                player.RemoveBuff(buffPrefab.ID, false);
-                                activeModBuffIDs.Remove(buffPrefab.ID);
+                                // 判断buff是否为无限时长
+                                bool isInfiniteBuff = IsBuffInfinite(currentBuff);
+                                
+                                if (isInfiniteBuff)
+                                {
+                                    // 是无限时长的buff，说明是mod添加的或还在mod控制下，可以移除
+                                    if (activeModBuffInstances.TryGetValue(buffId, out Buff modBuffInstance) && modBuffInstance == currentBuff)
+                                    {
+                                        // 实例匹配，精确移除
+                                        if (TryRemoveSpecificBuff(buffManager, modBuffInstance))
+                                        {
+                                            Log($"移除Mod Buff实例: {buffId}");
+                                        }
+                                        else
+                                        {
+                                            player.RemoveBuff(buffPrefab.ID, false);
+                                            Log($"移除Mod Buff: {buffId}");
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // 是无限buff但实例不匹配，直接移除
+                                        player.RemoveBuff(buffPrefab.ID, false);
+                                        Log($"移除无限时长Buff: {buffId}");
+                                    }
+                                    activeModBuffIDs.Remove(buffId);
+                                    activeModBuffInstances.Remove(buffId);
+                                }
+                                else
+                                {
+                                    // 是有限时长的buff，可能是玩家使用药剂后覆盖的，不要移除
+                                    // 只清除mod的追踪记录
+                                    Log($"检测到有限时长Buff({buffId})，可能是玩家使用药剂，不移除");
+                                    activeModBuffIDs.Remove(buffId);
+                                    activeModBuffInstances.Remove(buffId);
+                                }
                             }
-                        }
-                        else
-                        {
-                            activeModBuffIDs.Remove(buffPrefab.ID);
+                            else
+                            {
+                                // buff已经不存在了，清除追踪记录
+                                activeModBuffIDs.Remove(buffId);
+                                activeModBuffInstances.Remove(buffId);
+                            }
                         }
                     }
                 }
@@ -781,8 +831,99 @@ namespace PersistentPotionBuff
 
 
 
+        // 判断buff是否为无限时长
+        private bool IsBuffInfinite(Buff buff)
+        {
+            if (buff == null) return false;
+            
+            try
+            {
+                Type buffType = typeof(Buff);
+                FieldInfo limitedLifeTimeField = buffType.GetField("limitedLifeTime", BindingFlags.NonPublic | BindingFlags.Instance);
+                FieldInfo totalLifeTimeField = buffType.GetField("totalLifeTime", BindingFlags.NonPublic | BindingFlags.Instance);
+                
+                // 检查是否为无限寿命
+                bool isLimited = limitedLifeTimeField != null ? (bool)limitedLifeTimeField.GetValue(buff) : true;
+                float totalLife = totalLifeTimeField != null ? (float)totalLifeTimeField.GetValue(buff) : 0f;
+                
+                // 无限寿命的buff：limitedLifeTime=false 或 totalLifeTime很大（超过99999秒）
+                return !isLimited || totalLife > 99999f;
+            }
+            catch (Exception e)
+            {
+                Log($"判断buff时长失败: {e.Message}");
+                return false;
+            }
+        }
+
+        // 查找无限寿命的buff（mod添加的）
+        private Buff FindInfiniteLifetimeBuff(IEnumerable<Buff> buffs, int buffId)
+        {
+            try
+            {
+                foreach (var buff in buffs)
+                {
+                    if (buff != null && buff.ID == buffId && IsBuffInfinite(buff))
+                    {
+                        return buff;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log($"查找无限寿命buff失败: {e.Message}");
+            }
+            return null;
+        }
+
+        // 尝试移除特定的buff实例
+        private bool TryRemoveSpecificBuff(CharacterBuffManager buffManager, Buff buffToRemove)
+        {
+            try
+            {
+                // 通过反射访问buff列表
+                Type managerType = buffManager.GetType();
+                FieldInfo buffsField = managerType.GetField("buffs", BindingFlags.NonPublic | BindingFlags.Instance);
+                
+                if (buffsField == null)
+                {
+                    // 尝试其他可能的字段名
+                    buffsField = managerType.GetField("_buffs", BindingFlags.NonPublic | BindingFlags.Instance);
+                }
+                
+                if (buffsField != null)
+                {
+                    var buffsList = buffsField.GetValue(buffManager) as System.Collections.IList;
+                    if (buffsList != null && buffsList.Contains(buffToRemove))
+                    {
+                        buffsList.Remove(buffToRemove);
+                        
+                        // 尝试调用buff的清理方法
+                        try
+                        {
+                            if (buffToRemove != null)
+                            {
+                                // 销毁buff对象
+                                UnityEngine.Object.Destroy(buffToRemove.gameObject);
+                            }
+                        }
+                        catch { }
+                        
+                        return true;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log($"移除特定buff实例失败: {e.Message}");
+            }
+            return false;
+        }
+
         private void SetBuffInfinite(Buff buff)
         {
+            if (buff == null) return;
+            
             // 反射修改Buff字段
             Type type = typeof(Buff);
             
