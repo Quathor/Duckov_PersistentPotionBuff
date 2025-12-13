@@ -218,7 +218,7 @@ namespace PersistentPotionBuff
                 // 获取当前DLL的路径
                 string dllPath = Assembly.GetExecutingAssembly().Location;
                 string dllDirectory = Path.GetDirectoryName(dllPath);
-                string templatePath = Path.Combine(dllDirectory, "BuffMapping.json");
+                string templatePath = Path.Combine(dllDirectory, "BuffMapping.example.json");
 
                 Debug.Log($"[PersistentPotionBuff] DLL路径: {dllPath}");
                 Debug.Log($"[PersistentPotionBuff] 模板文件路径: {templatePath}");
