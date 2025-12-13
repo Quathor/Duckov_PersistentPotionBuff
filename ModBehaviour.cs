@@ -65,7 +65,8 @@ namespace PersistentPotionBuff
 
         // 配置
         private ConfigSettings _settings = new ConfigSettings();
-        private string ConfigFilePath => Path.Combine(Application.dataPath, "..", "PersistentPotionBuff", "BuffMapping.json");
+        // 配置文件路径为 Duckov_Data\Mods\PersistentPotionBuff\BuffMapping.json
+        private string ConfigFilePath => Path.Combine(Application.dataPath, "..", "Duckov_Data", "Mods", "PersistentPotionBuff", "BuffMapping.json");
 
         private void Start()
         {
@@ -228,15 +229,15 @@ namespace PersistentPotionBuff
                     return false;
                 }
 
-                // 确保目标目录存在
-                string targetDirectory = Path.GetDirectoryName(ConfigFilePath);
+                // 目录为 Duckov_Data\Mods\PersistentPotionBuff
+                string targetDirectory = Path.Combine(Application.dataPath, "..", "Duckov_Data", "Mods", "PersistentPotionBuff");
                 if (!Directory.Exists(targetDirectory))
                 {
                     Directory.CreateDirectory(targetDirectory);
                     Debug.Log($"[PersistentPotionBuff] 已创建目录: {targetDirectory}");
                 }
 
-                // 复制文件
+                // 复制文件到 Duckov_Data\Mods\PersistentPotionBuff\BuffMapping.json
                 File.Copy(templatePath, ConfigFilePath, false);
                 Debug.Log($"[PersistentPotionBuff] 已复制模板文件到: {ConfigFilePath}");
                 
