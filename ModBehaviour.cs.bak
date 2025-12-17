@@ -1,0 +1,1157 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Linq;
+using System.IO;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+using Duckov.Modding;
+using Duckov.Buffs;
+using Duckov.Utilities;
+using ItemStatsSystem;
+using ItemStatsSystem.Items;
+using Newtonsoft.Json;
+
+namespace PersistentPotionBuff
+{
+    // 配置文件数据结构
+    [Serializable]
+    public class BuffMappingConfig
+    {
+        public List<BuffMappingEntry> mappings;
+        public ConfigSettings settings;
+    }
+
+    [Serializable]
+    public class BuffMappingEntry
+    {
+        public int itemId;
+        public int buffId;
+    }
+
+    [Serializable]
+    public class ConfigSettings
+    {
+        public int targetContainerId = 882;
+        public int requiredItemCount = 3;
+        public bool enableInBaseLevel = false;
+        public List<string> additionalSlots = new List<string> { "Medic" };
+    }
+
+    public class ModBehaviour : Duckov.Modding.ModBehaviour
+    {
+        // 物品ID与BuffID列表映射配置
+        private Dictionary<int, HashSet<int>> _itemIdToBuffIdsMap = new Dictionary<int, HashSet<int>>();
+        // 游戏内BuffID查找Buff对象缓存
+        private Dictionary<int, Buff> _buffPrefabCache = new Dictionary<int, Buff>();
+
+        // 已激活BuffID
+        private HashSet<int> activeModBuffIDs = new HashSet<int>();
+        
+        // 保存Mod添加的Buff实例引用
+        private Dictionary<int, Buff> activeModBuffInstances = new Dictionary<int, Buff>();
+
+        // 已订阅的Inventory
+        private HashSet<Inventory> subscribedInventories = new HashSet<Inventory>();
+        // 追踪的容器列表
+        private HashSet<Item> trackedContainers = new HashSet<Item>();
+
+        // 追踪的额外槽位 (SlotName -> SlotObj)
+        private Dictionary<string, ItemStatsSystem.Items.Slot> _trackedSlots = new Dictionary<string, ItemStatsSystem.Items.Slot>();
+
+        // 记录最近使用的物品
+        private int _lastUsedItemId = -1;
+        private Item _lastUsedItemInstance = null;
+        private float _lastUsedTime = -1f;
+        private HashSet<int> _lastUsedVanillaBuffIds = new HashSet<int>();
+
+        // Debug选项
+        public static bool DebugMode = true;
+
+        // 反射缓存
+        private static FieldInfo _buffLimitedLifeTimeField;    //是否有限时长 
+        private static FieldInfo _buffTotalLifeTimeField;   //buff的持续时间
+        private static FieldInfo _managerBuffsField;    //正在生效的buff列表
+        private static bool _reflectionInitialized = false;    //是否初始化
+
+        private void EnsureReflectionCache()
+        //初始化反射缓存
+        {
+            if (_reflectionInitialized) return;
+            
+            try 
+            {
+                Type buffType = typeof(Buff);
+                _buffLimitedLifeTimeField = buffType.GetField("limitedLifeTime", BindingFlags.NonPublic | BindingFlags.Instance);
+                _buffTotalLifeTimeField = buffType.GetField("totalLifeTime", BindingFlags.NonPublic | BindingFlags.Instance);
+
+                Type managerType = typeof(CharacterBuffManager);
+                _managerBuffsField = managerType.GetField("buffs", BindingFlags.NonPublic | BindingFlags.Instance);
+                if (_managerBuffsField == null)
+                    _managerBuffsField = managerType.GetField("_buffs", BindingFlags.NonPublic | BindingFlags.Instance);
+                
+                _reflectionInitialized = true;
+                // Log("[PersistentPotionBuff] 反射字段缓存完成");
+            } 
+            catch (Exception e) 
+            {
+                Debug.LogError($"[PersistentPotionBuff] 反射字段缓存失败: {e.Message}");
+            }
+        }
+
+        // 读取配置配置文件: Duckov_Data\Mods\PersistentPotionBuff\BuffMapping.json
+        private ConfigSettings _settings = new ConfigSettings(); 
+
+        private string ConfigFilePath => Path.Combine(Application.dataPath, "..", "Duckov_Data", "Mods", "PersistentPotionBuff", "BuffMapping.json");
+
+        private void Start()
+        //初始化入口
+        {
+            EnsureReflectionCache();
+            InitializeBuffMap();
+            
+            // 缓存Buff
+            CacheBuffs();
+
+            // 注册关卡初始化
+            LevelManager.OnLevelInitialized += OnLevelInitialized;
+            
+            // 若关卡已初始化则直接执行
+            if (LevelManager.Instance != null && LevelManager.Instance.MainCharacter != null)
+            {
+                OnLevelInitialized();
+            }
+        }
+
+        private void OnItemUsed(Item item, object user)
+        //物品使用事件监听
+        {
+            if (item != null)
+            {
+                _lastUsedItemId = item.TypeID;
+                _lastUsedItemInstance = item;
+                _lastUsedTime = Time.time;
+                _lastUsedVanillaBuffIds = GetVanillaBuffIds(item);
+                Debug.Log($"[PersistentPotionBuff] 物品被使用: {item.DisplayName} (ID: {item.TypeID}), 原版Buff数: {_lastUsedVanillaBuffIds.Count}");
+                
+                StartCoroutine(DeferredUpdate(false));     //延迟更新
+            }
+        }
+
+        private void OnEnable()
+        // 注册关卡初始化、场景加载、物品使用等事件
+        {
+            LevelManager.OnLevelInitialized -= OnLevelInitialized;
+            LevelManager.OnLevelInitialized += OnLevelInitialized;
+            SceneManager.sceneLoaded -= OnSceneLoaded;
+            SceneManager.sceneLoaded += OnSceneLoaded;
+            
+            Item.onUseStatic -= OnItemUsed;
+            Item.onUseStatic += OnItemUsed;
+        }
+
+        private void OnDisable()
+        //注销所有事件
+        {
+            LevelManager.OnLevelInitialized -= OnLevelInitialized;
+            CharacterMainControl.OnMainCharacterInventoryChangedEvent -= OnMainCharacterInventoryChanged;
+            SceneManager.sceneLoaded -= OnSceneLoaded;
+            
+            if (PetProxy.Instance != null && PetProxy.PetInventory != null)
+            {
+                PetProxy.PetInventory.onContentChanged -= OnPetInventoryChanged;
+            }
+
+            Item.onUseStatic -= OnItemUsed;
+
+            // 取消订阅额外槽位事件
+            foreach (var kvp in _trackedSlots)
+            {
+                if (kvp.Value != null)
+                {
+                    try { kvp.Value.onSlotContentChanged -= OnTrackedSlotChanged; } catch {}
+                }
+            }
+            _trackedSlots.Clear();
+        }
+
+        private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        //场景加载后初始化
+        {
+            ResetTrackingState();
+            StartCoroutine(WaitForMainAndPetThenResubscribe());
+        }
+
+        private void ResetTrackingState()
+        {
+            foreach (var inv in subscribedInventories.ToList())
+            {
+                if (inv != null)
+                    inv.onContentChanged -= OnContainerContentChanged;
+            }
+            subscribedInventories.Clear();
+            trackedContainers.Clear();
+            activeModBuffIDs.Clear();
+            activeModBuffInstances.Clear();
+
+            // 解除额外槽位订阅
+            foreach (var kvp in _trackedSlots)
+            {
+                if (kvp.Value != null)
+                {
+                    try { kvp.Value.onSlotContentChanged -= OnTrackedSlotChanged; } catch {}
+                }
+            }
+            _trackedSlots.Clear();
+        }
+
+        private void InitializeBuffMap()
+        //初始化BuffID映射表
+        {
+            _itemIdToBuffIdsMap.Clear();
+            
+            // 尝试从配置文件加载（如果不存在会自动生成默认配置）
+            if (LoadConfigFromFile())
+            {
+                Debug.Log($"[PersistentPotionBuff] 成功加载配置，共 {_itemIdToBuffIdsMap.Count} 个物品映射");
+            }
+            else
+            {
+                // 如果加载失败（如解析错误等），使用默认配置
+                Debug.LogWarning("[PersistentPotionBuff] 配置文件加载失败，使用默认配置");
+                LoadDefaultConfig();
+            }
+        }
+
+        private bool LoadConfigFromFile()
+        {
+            try
+            {
+                if (!File.Exists(ConfigFilePath))
+                {
+                    Debug.LogWarning($"[PersistentPotionBuff] 配置文件不存在: {ConfigFilePath}");
+                    
+                    // 尝试从DLL所在目录复制模板文件
+                    if (CopyTemplateConfigFromDllDirectory())
+                    {
+                        Debug.Log("[PersistentPotionBuff] 已从DLL目录复制模板配置文件");
+                        // 复制成功后继续读取文件
+                    }
+                    else
+                    {
+                        // 如果模板文件不存在，返回false使用内存中的默认配置
+                        Debug.LogWarning("[PersistentPotionBuff] DLL目录下未找到模板文件，将使用内存中的默认配置");
+                        return false;
+                    }
+                }
+
+                string json = File.ReadAllText(ConfigFilePath);
+                BuffMappingConfig config = JsonConvert.DeserializeObject<BuffMappingConfig>(json);
+
+                if (config == null || config.mappings == null)
+                {
+                    Debug.LogError("[PersistentPotionBuff] 配置文件格式错误");
+                    return false;
+                }
+
+                // 加载映射
+                foreach (var entry in config.mappings)
+                {
+                    if (entry.buffId > 0)
+                    {
+                        if (!_itemIdToBuffIdsMap.ContainsKey(entry.itemId))
+                        {
+                            _itemIdToBuffIdsMap[entry.itemId] = new HashSet<int>();
+                        }
+                        _itemIdToBuffIdsMap[entry.itemId].Add(entry.buffId);
+                    }
+                }
+
+                // 加载设置
+                if (config.settings != null)
+                {
+                    _settings = config.settings;
+                }
+
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[PersistentPotionBuff] 加载配置文件失败: {e.Message}");
+                return false;
+            }
+        }
+
+        private bool CopyTemplateConfigFromDllDirectory()
+        //复制模版文件到mod目录
+        {
+            try
+            {
+                // 获取当前DLL的路径
+                string dllPath = Assembly.GetExecutingAssembly().Location;
+                string dllDirectory = Path.GetDirectoryName(dllPath);
+                string templatePath = Path.Combine(dllDirectory, "BuffMapping.example.json");
+
+                Debug.Log($"[PersistentPotionBuff] DLL路径: {dllPath}");
+                Debug.Log($"[PersistentPotionBuff] 模板文件路径: {templatePath}");
+
+                if (!File.Exists(templatePath))
+                {
+                    Debug.LogWarning($"[PersistentPotionBuff] 模板文件不存在: {templatePath}");
+                    return false;
+                }
+
+                // 创建目录: Duckov_Data\Mods\PersistentPotionBuff
+                string targetDirectory = Path.Combine(Application.dataPath, "..", "Duckov_Data", "Mods", "PersistentPotionBuff");
+                if (!Directory.Exists(targetDirectory))
+                {
+                    Directory.CreateDirectory(targetDirectory);
+                    Debug.Log($"[PersistentPotionBuff] 已创建目录: {targetDirectory}");
+                }
+
+                // 复制文件到 Duckov_Data\Mods\PersistentPotionBuff\BuffMapping.json
+                File.Copy(templatePath, ConfigFilePath, false);
+                Debug.Log($"[PersistentPotionBuff] 已复制模板文件到: {ConfigFilePath}");
+                
+                return true;
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[PersistentPotionBuff] 复制模板文件失败: {e.Message}");
+                return false;
+            }
+        }
+
+        private void LoadDefaultConfig()
+        {
+            void AddMapping(int itemId, int buffId)
+            {
+                if (!_itemIdToBuffIdsMap.ContainsKey(itemId))
+                    _itemIdToBuffIdsMap[itemId] = new HashSet<int>();
+                _itemIdToBuffIdsMap[itemId].Add(buffId);
+            }
+
+            AddMapping(0, 1201);      // 夜视
+            AddMapping(137, 1011);    // 加速
+            AddMapping(398, 1012);    // 负重
+            AddMapping(408, 1072);    // 电抗
+            AddMapping(409, 1084);    // 痛觉抗性
+            AddMapping(438, 1092);    // 热血
+            AddMapping(797, 1013);    // 护甲
+            AddMapping(798, 1014);    // 耐力
+            AddMapping(800, 1015);    // 近战伤害
+            AddMapping(872, 1017);    // 后坐力控制
+            AddMapping(875, 1018);    // 持续治疗
+            AddMapping(856, 1113);    // 风暴保护
+            AddMapping(1070, 1074);   // 火焰抗性
+            AddMapping(1071, 1075);   // 毒抗
+            AddMapping(1072, 1076);   // 空间抗性
+            AddMapping(1247, 1019);   // 出血抗性
+        }
+
+        private void CacheBuffs()
+        {
+            try 
+            {
+                var allBuffs = Resources.FindObjectsOfTypeAll<Buff>();
+                _buffPrefabCache.Clear();
+                foreach (var buff in allBuffs)
+                {
+                    if (buff != null)
+                    {
+                        _buffPrefabCache[buff.ID] = buff;
+                    }
+                }
+                Debug.Log($"[PersistentPotionBuff] 已缓存 {_buffPrefabCache.Count} 个Buff");
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[PersistentPotionBuff] 缓存Buff失败: {e.Message}");
+            }
+        }
+
+        private void OnDestroy()
+        //清理事件订阅和资源
+        {
+            LevelManager.OnLevelInitialized -= OnLevelInitialized;
+            CharacterMainControl.OnMainCharacterInventoryChangedEvent -= OnMainCharacterInventoryChanged;
+            
+            if (PetProxy.Instance != null && PetProxy.PetInventory != null)
+            {
+                PetProxy.PetInventory.onContentChanged -= OnPetInventoryChanged;
+            }
+
+            foreach (var inv in subscribedInventories)
+            {
+                if (inv != null)
+                {
+                    inv.onContentChanged -= OnContainerContentChanged;
+                }
+            }
+            subscribedInventories.Clear();
+        }
+
+        private void OnLevelInitialized()
+        //每次场景初始化时的入口
+        {
+            Debug.Log("[PersistentPotionBuff] 场景初始化事件触发");
+            CacheBuffs();
+            if (LevelConfig.IsBaseLevel && !_settings.enableInBaseLevel)
+            {
+                Debug.Log("[PersistentPotionBuff] 当前为基地场景且未开启基地生效配置");
+                // 基地场景：只移除由本mod添加的buff
+                CharacterMainControl player = CharacterMainControl.Main;
+                var buffManager = player != null ? player.GetBuffManager() : null;
+                if (buffManager != null)
+                {
+                    foreach (var buffId in activeModBuffIDs.ToList())
+                    {
+                        var currentBuff = buffManager.Buffs.FirstOrDefault(b => b.ID == buffId);
+                        if (currentBuff != null && IsBuffInfinite(currentBuff))
+                        {
+                            if (activeModBuffInstances.TryGetValue(buffId, out Buff buffInstance) && 
+                                buffInstance == currentBuff && 
+                                TryRemoveSpecificBuff(buffManager, buffInstance))
+                            {
+                                Debug.Log($"[PersistentPotionBuff] 移除Mod Buff实例: {buffId}");
+                            }
+                            else if (_buffPrefabCache.TryGetValue(buffId, out Buff buffPrefab))
+                            {
+                                player.RemoveBuff(buffPrefab.ID, false);
+                                Debug.Log($"[PersistentPotionBuff] 移除无限时长Buff: {buffId}");
+                            }
+                        }
+                        else
+                        {
+                            Debug.Log($"[PersistentPotionBuff] 跳过有限时长Buff: {buffId}");
+                        }
+                    }
+                    activeModBuffIDs.Clear();
+                    activeModBuffInstances.Clear();
+                }
+                ResetTrackingState();
+                return;
+            }
+            CharacterMainControl.OnMainCharacterInventoryChangedEvent -= OnMainCharacterInventoryChanged;
+            CharacterMainControl.OnMainCharacterInventoryChangedEvent += OnMainCharacterInventoryChanged;
+
+            StartCoroutine(InitialCheckRoutine());
+            StartCoroutine(WaitForPetInventoryAndResubscribe());
+            StartCoroutine(WaitForSlotsAndSubscribe());
+        }
+
+        private IEnumerator InitialCheckRoutine()
+        //初始容器扫描和Buff状态更新
+        {
+            yield return new WaitForSeconds(1.0f);
+            UpdateTrackedContainers();
+            yield return new WaitForEndOfFrame();
+            UpdateBuffs();
+        }
+
+        private IEnumerator WaitForPetInventoryAndResubscribe()
+        //宠物背包加载
+        {
+            int safeCounter = 0;
+            while ((PetProxy.Instance == null || PetProxy.PetInventory == null) && safeCounter < 300)
+            {
+                safeCounter++;
+                yield return null;
+            }
+
+            if (PetProxy.Instance != null && PetProxy.PetInventory != null)
+            {
+                PetProxy.PetInventory.onContentChanged -= OnPetInventoryChanged;
+                PetProxy.PetInventory.onContentChanged += OnPetInventoryChanged;
+            }
+
+            UpdateTrackedContainers();
+            yield return new WaitForEndOfFrame();
+            UpdateBuffs();
+        }
+
+        private IEnumerator WaitForMainAndPetThenResubscribe()
+        //玩家与场景加载
+        {
+            int guard = 0;
+            while ((LevelManager.Instance == null || CharacterMainControl.Main == null) && guard < 600)
+            {
+                guard++;
+                yield return null;
+            }
+            yield return WaitForPetInventoryAndResubscribe();
+            // 玩家背包事件
+            CharacterMainControl.OnMainCharacterInventoryChangedEvent -= OnMainCharacterInventoryChanged;
+            CharacterMainControl.OnMainCharacterInventoryChangedEvent += OnMainCharacterInventoryChanged;
+            // 订阅额外槽位变化
+            yield return WaitForSlotsAndSubscribe();
+        }
+
+        private IEnumerator WaitForSlotsAndSubscribe()
+        //额外slot槽位加载与订阅
+        {
+            int guard = 0;
+            while ((CharacterMainControl.Main == null || CharacterMainControl.Main.CharacterItem == null || CharacterMainControl.Main.CharacterItem.Slots == null) && guard < 600)
+            {
+                guard++;
+                yield return null;
+            }
+
+            if (_settings.additionalSlots == null) yield break;
+
+            foreach (var slotName in _settings.additionalSlots)
+            {
+                var slot = GetSlotByName(slotName);
+                if (slot != null)
+                {
+                    // 取消之前订阅
+                    if (_trackedSlots.TryGetValue(slotName, out var oldSlot) && oldSlot != null)
+                    {
+                        try { oldSlot.onSlotContentChanged -= OnTrackedSlotChanged; } catch {}
+                    }
+
+                    _trackedSlots[slotName] = slot;
+                    try 
+                    { 
+                        slot.onSlotContentChanged += OnTrackedSlotChanged; 
+                        Debug.Log($"[PersistentPotionBuff] 已订阅槽位变化事件: {slotName}"); 
+                    } 
+                    catch {}
+                }
+            }
+
+            UpdateTrackedContainers();
+            yield return new WaitForEndOfFrame();
+            UpdateBuffs();
+        }
+
+        private void OnTrackedSlotChanged(ItemStatsSystem.Items.Slot slot)
+        // 额外slot槽位内容变化事件
+        {
+            Debug.Log($"[PersistentPotionBuff] 追踪槽位变化，内容:{(slot?.Content != null ? slot.Content.TypeID.ToString() : "空")}");
+            StartCoroutine(DeferredUpdate(rescan: true));
+        }
+
+        private ItemStatsSystem.Items.Slot GetSlotByName(string slotName)
+        // 根据名称获取玩家的槽位
+        {
+            try
+            {
+                var main = CharacterMainControl.Main;
+                if (main == null || main.CharacterItem == null) return null;
+                var slots = main.CharacterItem.Slots;
+                if (slots == null) return null;
+                
+                ItemStatsSystem.Items.Slot slot = null;
+                try { slot = slots[slotName]; } catch { slot = null; }
+                
+                if (slot == null)
+                {
+                    foreach (var s in slots)
+                    {
+                        if (s != null && string.Equals(s.Key, slotName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            slot = s; break;
+                        }
+                    }
+                }
+                return slot;
+            }
+            catch { return null; }
+        }
+
+        private void OnMainCharacterInventoryChanged(CharacterMainControl character, Inventory inventory, int index)
+        // 玩家背包变化监听
+        {
+            if (character == CharacterMainControl.Main)
+            {
+                Debug.Log($"[PersistentPotionBuff] 玩家背包变化，索引:{index}");
+                StartCoroutine(DeferredUpdate());
+            }
+        }
+
+        private void OnPetInventoryChanged(Inventory inventory, int index)
+        {
+            Debug.Log($"[PersistentPotionBuff] 宠物背包变化，索引:{index}");
+            StartCoroutine(DeferredUpdate());
+        }
+
+        private void CheckInventoryChange(Inventory inventory, int index)
+        // 检查背包变化是否相关并更新
+        {
+            bool isRelevant = false;
+            if (index >= 0 && index < inventory.Capacity)
+            {
+                Item item = inventory[index];
+                if (item == null) 
+                {
+                    isRelevant = true; 
+                }
+                else 
+                {
+                    if (IsOrContainsTarget(item, _settings.targetContainerId))
+                    {
+                        isRelevant = true;
+                    }
+                }
+            }
+            
+            if (isRelevant)
+            {
+                UpdateTrackedContainers();
+                UpdateBuffs();
+            }
+        }
+
+        private void OnContainerContentChanged(Inventory inventory, int index)
+        // 容器物品变化监听
+        {
+            StartCoroutine(DeferredUpdate(false));
+        }
+
+        private IEnumerator DeferredUpdate(bool rescan = true)
+        //延迟更新协程
+        {
+            yield return new WaitForEndOfFrame();
+            if (rescan)
+            {
+                UpdateTrackedContainers();
+            }
+            UpdateBuffs();
+        }
+
+        private bool IsOrContainsTarget(Item item, int targetID)
+        //递归判断物品是否为目标容器
+        {
+            if (item == null) return false;
+            if (item.TypeID == targetID) return true;
+            
+            if (item.Inventory != null)
+            {
+                foreach(var child in item.Inventory)
+                {
+                    if (IsOrContainsTarget(child, targetID)) return true;
+                }
+            }
+            return false;
+        }
+
+        private void UpdateTrackedContainers()
+        //容器追踪与订阅管理
+        {
+            HashSet<Item> newContainers = GetAllTargetContainers();
+            foreach (var container in newContainers)
+            {
+                if (!trackedContainers.Contains(container))
+                {
+                    SubscribeToContainer(container);
+                }
+            }
+            foreach (var container in trackedContainers)
+            {
+                if (!newContainers.Contains(container))
+                {
+                    UnsubscribeFromContainer(container);
+                }
+            }
+            trackedContainers = newContainers;
+        }
+
+        // --- 容器内部管理方法 ---
+        private IEnumerable<Inventory> GetInventoriesOn(Item item)
+        // 获取物品上的所有 Inventory 对象
+        {
+            if (item == null) yield break;
+            if (item.Inventory != null) yield return item.Inventory;
+            var compInv = item.GetComponent<Inventory>();
+            if (compInv != null && compInv != item.Inventory) yield return compInv;
+        }
+
+        private void SubscribeToContainer(Item container)
+        //订阅非空容器
+        {
+            foreach (var inv in GetInventoriesOn(container))
+            {
+                if (inv != null && subscribedInventories.Add(inv))
+                {
+                    inv.onContentChanged += OnContainerContentChanged;
+                }
+            }
+        }
+
+        private void UnsubscribeFromContainer(Item container)
+        //取消订阅
+        {
+            foreach (var inv in GetInventoriesOn(container))
+            {
+                if (inv != null && subscribedInventories.Remove(inv))
+                {
+                    inv.onContentChanged -= OnContainerContentChanged;
+                }
+            }
+        }
+
+        private void UpdateBuffs()
+        //Buff更新管理
+        {
+            // 基地场景不生效（除非配置允许）
+            if (LevelConfig.IsBaseLevel && !_settings.enableInBaseLevel)
+            {
+                Debug.Log("[PersistentPotionBuff] 基地场景，不进行Buff更新");
+                return;
+            }
+            // 开始更新 Buff
+            CharacterMainControl player = CharacterMainControl.Main;
+            if (player == null) { Debug.Log("[PersistentPotionBuff] 未找到玩家"); return; }
+            CharacterBuffManager buffManager = player.GetBuffManager();
+            if (buffManager == null) { Debug.Log("[PersistentPotionBuff] 未找到Buff管理器"); return; }
+            if (trackedContainers == null) trackedContainers = new HashSet<Item>();
+            // 统计所有容器物品
+            Dictionary<int, int> itemCounts = new Dictionary<int, int>();
+            foreach (var container in trackedContainers)
+            {
+                if (container == null) continue;
+                
+                // 统计 Inventory 中的物品
+                foreach (var inv in GetInventoriesOn(container))
+                {
+                    foreach (var item in inv)
+                    {
+                        if (item != null)
+                        {
+                            // 如果该物品是最近刚使用的物品（且时间很短），则不计入统计
+                            // 因为在容器中使用物品通常会消耗或弹出该物品，我们提前将其排除
+                            if (item == _lastUsedItemInstance && Time.time - _lastUsedTime < 0.5f)
+                            {
+                                continue;
+                            }
+
+                            int count = item.StackCount;
+                            if (itemCounts.ContainsKey(item.TypeID))
+                                itemCounts[item.TypeID] += count;
+                            else
+                                itemCounts[item.TypeID] = count;
+                        }
+                    }
+                }
+
+                // 统计 Slots 中的物品
+                if (container.Slots != null)
+                {
+                    foreach(var slot in container.Slots)
+                    {
+                        if(slot != null && slot.Content != null) 
+                        {
+                            var item = slot.Content;
+                            
+                            // 检查Slot中的物品是否刚被使用
+                            if (item == _lastUsedItemInstance && Time.time - _lastUsedTime < 0.5f)
+                            {
+                                continue;
+                            }
+
+                            int count = item.StackCount;
+                            if (itemCounts.ContainsKey(item.TypeID))
+                                itemCounts[item.TypeID] += count;
+                            else
+                                itemCounts[item.TypeID] = count;
+                        }
+                    }
+                }
+            }
+            // 应用或移除Buff
+            // 1. 计算当前应该激活的所有 Buff ID
+            HashSet<int> buffsToActivate = new HashSet<int>();
+            
+            foreach (var kvp in itemCounts)
+            {
+                int itemId = kvp.Key;
+                int count = kvp.Value;
+                
+                if (count >= _settings.requiredItemCount)
+                {
+                    if (_itemIdToBuffIdsMap.TryGetValue(itemId, out HashSet<int> buffIds))
+                    {
+                        foreach (var buffId in buffIds)
+                        {
+                            buffsToActivate.Add(buffId);
+                        }
+                    }
+                }
+            }
+
+            // 2. 处理新增的 Buff
+            foreach (var buffId in buffsToActivate)
+            {
+                if (!activeModBuffIDs.Contains(buffId))
+                {
+                    if (_buffPrefabCache.TryGetValue(buffId, out Buff buffPrefab))
+                    {
+                        // 添加 Buff
+                        player.AddBuff(buffPrefab, player);
+                        activeModBuffIDs.Add(buffId);
+                        
+                        // 记录实例
+                        var addedBuff = buffManager.Buffs.FirstOrDefault(b => b.ID == buffPrefab.ID);
+                        if (addedBuff != null)
+                        {
+                            activeModBuffInstances[buffId] = addedBuff;
+                        }
+                        Debug.Log($"[PersistentPotionBuff] 添加Mod Buff: {buffId}");
+                    }
+                }
+                
+                // 确保是无限时长 (对所有应该激活的，无论是新加的还是已有的)
+                if (activeModBuffInstances.TryGetValue(buffId, out Buff modBuff) && modBuff != null)
+                {
+                    SetBuffInfinite(modBuff);
+                }
+            }
+
+            // 3. 处理需要移除的 Buff (在 activeModBuffIDs 中但不在 buffsToActivate 中)
+            foreach (var buffId in activeModBuffIDs.ToList())
+            {
+                if (!buffsToActivate.Contains(buffId))
+                {
+                    // 需要移除
+                    var currentBuff = buffManager.Buffs.FirstOrDefault(b => b.ID == buffId);
+                    
+                    if (currentBuff != null)
+                    {
+                        bool isInfiniteBuff = IsBuffInfinite(currentBuff);
+                        if (isInfiniteBuff)
+                        {
+                             // 检查是否因为使用药剂导致数量减少
+                             // 并且该 Buff 是原版药剂应该产生的 Buff
+                             bool isVanillaUsage = false;
+                             
+                             // 检查是否是最近使用的物品类型
+                             if (_itemIdToBuffIdsMap.TryGetValue(_lastUsedItemId, out HashSet<int> mappedBuffs) && mappedBuffs.Contains(buffId))
+                             {
+                                 if (Time.time - _lastUsedTime < 1.0f)
+                                 {
+                                     // 是刚刚使用的物品触发的 Buff
+                                     // 现在检查这个 Buff 是否是原版 Buff
+                                     if (_lastUsedVanillaBuffIds.Contains(buffId))
+                                     {
+                                         isVanillaUsage = true;
+                                     }
+                                 }
+                             }
+
+                             if (isVanillaUsage)
+                             {
+                                 // 是原版 Buff，执行“降级”操作
+                                 if (activeModBuffInstances.TryGetValue(buffId, out Buff modBuffInstance) && modBuffInstance == currentBuff)
+                                 {
+                                     // 重置为有限时长
+                                     ResetBuffToFinite(modBuffInstance, buffId);
+                                     Debug.Log($"[PersistentPotionBuff] 检测到使用原版药剂，将 Buff {buffId} 重置为有限时长");
+                                 }
+                                 // 移除追踪，不再管理
+                                 activeModBuffIDs.Remove(buffId);
+                                 activeModBuffInstances.Remove(buffId);
+                                 continue; // 跳过移除逻辑
+                             }
+
+                             // 是无限时长的buff，说明是mod添加的，移除它
+                             if (activeModBuffInstances.TryGetValue(buffId, out Buff modBuffInstanceToRemove) && modBuffInstanceToRemove == currentBuff)
+                             {
+                                 if (TryRemoveSpecificBuff(buffManager, modBuffInstanceToRemove))
+                                 {
+                                     Debug.Log($"[PersistentPotionBuff] 移除Mod Buff实例: {buffId}");
+                                 }
+                                 else
+                                 {
+                                     if (_buffPrefabCache.TryGetValue(buffId, out Buff p))
+                                         player.RemoveBuff(p.ID, false);
+                                 }
+                             }
+                             else
+                             {
+                                 if (_buffPrefabCache.TryGetValue(buffId, out Buff p))
+                                     player.RemoveBuff(p.ID, false);
+                             }
+                             
+                             // 检查是否需要恢复原版 Buff (喝药逻辑) - 旧逻辑，现在通过上面的 isVanillaUsage 处理了
+                             // 但如果 buffId != vanillaBuffId，我们移除了 Mod Buff，原版 Buff (如果存在) 依然存在，不需要恢复。
+                             // 所以这里的恢复逻辑可以删除了。
+                        }
+                        else
+                        {
+                            Debug.Log($"[PersistentPotionBuff] 检测到有限时长Buff({buffId})，可能是玩家使用药剂，不移除");
+                        }
+                    }
+                    
+                    // 清理记录
+                    activeModBuffIDs.Remove(buffId);
+                    activeModBuffInstances.Remove(buffId);
+                }
+            }
+        }
+
+        private HashSet<int> GetVanillaBuffIds(Item item)
+        {
+            HashSet<int> ids = new HashSet<int>();
+            if (item == null) return ids;
+            
+            try
+            {
+                // 使用反射获取 Duckov.ItemUsage.AddBuff 组件
+                var components = item.GetComponents<MonoBehaviour>();
+                foreach (var comp in components)
+                {
+                    if (comp == null) continue;
+                    Type type = comp.GetType();
+                    if (type.FullName == "Duckov.ItemUsage.AddBuff")
+                    {
+                        // 获取 buffPrefab 字段
+                        var field = type.GetField("buffPrefab", BindingFlags.Public | BindingFlags.Instance);
+                        if (field != null)
+                        {
+                            Buff buff = field.GetValue(comp) as Buff;
+                            if (buff != null)
+                            {
+                                ids.Add(buff.ID);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[PersistentPotionBuff] 获取原版Buff失败: {e.Message}");
+            }
+            return ids;
+        }
+
+        private void ResetBuffToFinite(Buff buff, int buffId)
+        {
+            if (buff == null) return;
+            if (!_reflectionInitialized) EnsureReflectionCache();
+            
+            // 获取 Prefab 的默认值
+            float defaultLifeTime = 60f; // 默认值
+            bool defaultLimited = true;
+            
+            if (_buffPrefabCache.TryGetValue(buffId, out Buff prefab))
+            {
+                try {
+                    if (_buffTotalLifeTimeField != null)
+                        defaultLifeTime = (float)_buffTotalLifeTimeField.GetValue(prefab);
+                    if (_buffLimitedLifeTimeField != null)
+                        defaultLimited = (bool)_buffLimitedLifeTimeField.GetValue(prefab);
+                } catch {}
+            }
+            
+            // 设置实例的值
+            try {
+                if (_buffLimitedLifeTimeField != null)
+                    _buffLimitedLifeTimeField.SetValue(buff, defaultLimited);
+                if (_buffTotalLifeTimeField != null)
+                    _buffTotalLifeTimeField.SetValue(buff, defaultLifeTime);
+            } catch (Exception e) {
+                Debug.LogWarning($"[PersistentPotionBuff] 重置Buff时长失败: {e.Message}");
+            }
+        }
+
+        private bool ShouldApplyVanillaBuff(int itemTypeID)
+        //判断是否添加原版Buff
+        {
+            if (_lastUsedItemId == itemTypeID && Time.time - _lastUsedTime < 1.0f)
+            {
+                return true;
+            }
+            return false;
+        }
+
+        private void ApplyInfiniteBuff(CharacterMainControl player, CharacterBuffManager buffManager, Buff buffPrefab)
+        //添加一个无限时长的Buff
+        {
+            if (buffPrefab == null) return;
+
+            Buff activeBuff = null;
+            foreach (var b in buffManager.Buffs)
+            {
+                if (b.ID == buffPrefab.ID)
+                {
+                    activeBuff = b;
+                    break;
+                }
+            }
+
+            if (activeBuff == null)
+            {
+                player.AddBuff(buffPrefab, player);
+                foreach (var b in buffManager.Buffs)
+                {
+                    if (b.ID == buffPrefab.ID)
+                    {
+                        activeBuff = b;
+                        break;
+                    }
+                }
+            }
+
+            if (activeBuff != null)
+            {
+                // 设置为无限
+                SetBuffInfinite(activeBuff);
+            }
+        }
+
+        private HashSet<Item> GetAllTargetContainers()
+        // 检索所有目标容器
+        {
+            HashSet<Item> result = new HashSet<Item>();
+            int targetContainerID = _settings.targetContainerId;
+
+            // 检查玩家背包
+            if (CharacterMainControl.Main != null && CharacterMainControl.Main.CharacterItem != null)
+            {
+                CollectItemsRecursive(CharacterMainControl.Main.CharacterItem, targetContainerID, result);
+            }
+
+            // 检查宠物背包
+            Inventory petInventory = null;
+            try { petInventory = PetProxy.PetInventory; } catch { petInventory = null; }
+            if (petInventory != null)
+            {
+                for (int i = 0; i < petInventory.Capacity; i++)
+                {
+                    Item item = petInventory.GetItemAt(i);
+                    CollectItemsRecursive(item, targetContainerID, result);
+                }
+            }
+
+            // 检查额外槽位
+            foreach (var kvp in _trackedSlots)
+            {
+                var slot = kvp.Value;
+                if (slot != null && slot.Content != null)
+                {
+                    CollectItemsRecursive(slot.Content, targetContainerID, result);
+                }
+            }
+
+            return result;
+        }
+
+        // 递归查找目标容器
+        private void CollectItemsRecursive(Item currentItem, int targetID, HashSet<Item> result)
+        {
+            if (currentItem == null) return;
+
+            if (currentItem.TypeID == targetID)
+            {
+                result.Add(currentItem);
+            }
+
+            foreach (var inv in GetInventoriesOn(currentItem))
+            {
+                foreach (var childItem in inv)
+                {
+                    CollectItemsRecursive(childItem, targetID, result);
+                }
+            }
+        }
+
+
+
+        // 判断buff是否为无限时长
+        private bool IsBuffInfinite(Buff buff)
+        {
+            if (buff == null) return false;
+            if (!_reflectionInitialized) EnsureReflectionCache();
+            
+            try
+            {
+                // 检查是否为无限寿命
+                bool isLimited = _buffLimitedLifeTimeField != null ? (bool)_buffLimitedLifeTimeField.GetValue(buff) : true;
+                float totalLife = _buffTotalLifeTimeField != null ? (float)_buffTotalLifeTimeField.GetValue(buff) : 0f;
+                
+                // 无限寿命的buff：limitedLifeTime=false 或 totalLifeTime很大（超过99999秒）
+                return !isLimited || totalLife > 99999f;
+            }
+            catch (Exception e)
+            {
+                Debug.Log($"[PersistentPotionBuff] 判断buff时长失败: {e.Message}");
+                return false;
+            }
+        }
+
+        // 查找无限寿命的buff（mod添加的）
+        private Buff FindInfiniteLifetimeBuff(IEnumerable<Buff> buffs, int buffId)
+        {
+            try
+            {
+                foreach (var buff in buffs)
+                {
+                    if (buff != null && buff.ID == buffId && IsBuffInfinite(buff))
+                    {
+                        return buff;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.Log($"[PersistentPotionBuff] 查找无限寿命buff失败: {e.Message}");
+            }
+            return null;
+        }
+
+        // 尝试移除特定的buff实例
+        private bool TryRemoveSpecificBuff(CharacterBuffManager buffManager, Buff buffToRemove)
+        {
+            try
+            {
+                if (!_reflectionInitialized) EnsureReflectionCache();
+
+                if (_managerBuffsField != null)
+                {
+                    var buffsList = _managerBuffsField.GetValue(buffManager) as System.Collections.IList;
+                    if (buffsList != null && buffsList.Contains(buffToRemove))
+                    {
+                        buffsList.Remove(buffToRemove);
+                        
+                        // 尝试调用buff的清理方法
+                        try
+                        {
+                            if (buffToRemove != null)
+                            {
+                                // 销毁buff对象
+                                UnityEngine.Object.Destroy(buffToRemove.gameObject);
+                            }
+                        }
+                        catch { }
+                        
+                        return true;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.Log($"[PersistentPotionBuff] 移除特定buff实例失败: {e.Message}");
+            }
+            return false;
+        }
+
+        private void SetBuffInfinite(Buff buff)
+        {
+            if (buff == null) return;
+            if (!_reflectionInitialized) EnsureReflectionCache();
+            
+            // 设置无限寿命
+            if (_buffLimitedLifeTimeField != null)
+            {
+                _buffLimitedLifeTimeField.SetValue(buff, false);
+            }
+            
+            if (_buffTotalLifeTimeField != null)
+            {
+                _buffTotalLifeTimeField.SetValue(buff, 999999f);
+            }
+        }
+    }
+}
