@@ -1,0 +1,38 @@
+{
+  "mappings": [
+    {"itemId": 0, "buffId": 1201},
+    {"itemId": 137, "buffId": 1011},
+    {"itemId": 398, "buffId": 1012},
+    {"itemId": 408, "buffId": 1072},
+    {"itemId": 409, "buffId": 1084},
+    {"itemId": 438, "buffId": 1092},
+    {"itemId": 797, "buffId": 1013},
+    {"itemId": 798, "buffId": 1014},
+    {"itemId": 800, "buffId": 1015},
+    {"itemId": 872, "buffId": 1017},
+    {"itemId": 875, "buffId": 1018},
+    {"itemId": 856, "buffId": 1113},
+    {"itemId": 1070, "buffId": 1074},
+    {"itemId": 1071, "buffId": 1075},
+    {"itemId": 1072, "buffId": 1076},
+    {"itemId": 1247, "buffId": 1019},
+    {"itemId": 999991, "buffId": 999993},
+    {"itemId": 999992, "buffId": 999992},
+    {"itemId": 999993, "buffId": 999991},
+    {"itemId": 999994, "buffId": 999994},
+    {"itemId": 999995, "buffId": 999995},
+    {"itemId": 999996, "buffId": 999996},
+    {"itemId": 999997, "buffId": 999997},
+    {"itemId": 999998, "buffId": 999998},
+    {"itemId": 999999, "buffId": 999999},
+    {"itemId": 1000000, "buffId": 1000000},
+    {"itemId": 1000003, "buffId": 1000001},
+    {"itemId": 1000006, "buffId": 1000006},
+    {"itemId": 1000007, "buffId": 1000007}
+  ],
+  "settings": {
+    "targetContainerId": 882,
+    "requiredItemCount": 3,
+    "enableInBaseLevel": false
+  }
+}
