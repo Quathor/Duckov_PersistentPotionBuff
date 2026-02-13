@@ -34,6 +34,7 @@ namespace PersistentPotionBuff
         public bool enableInBaseLevel = false;
         // 扩展槽位mod的位置（例如 Medic）
         public List<string> additionalSlots = new List<string> { "Medic" };
+        public bool debugMode = false;
     }
 
     public class ConfigManager
@@ -51,7 +52,8 @@ namespace PersistentPotionBuff
             ItemIdToBuffIdsMap.Clear();
             if (LoadConfigFromFile())
             {
-                Debug.Log($"[PersistentPotionBuff] 成功加载配置，共 {ItemIdToBuffIdsMap.Count} 个物品映射");
+                LoadDefaultConfig();
+                if (Settings.debugMode) Debug.Log($"[PersistentPotionBuff] 成功加载配置，共 {ItemIdToBuffIdsMap.Count} 个物品映射");
             }
             else
             {
@@ -76,7 +78,7 @@ namespace PersistentPotionBuff
                 }
 
                 _buffPrefabCacheReady = true;
-                Debug.Log($"[PersistentPotionBuff] Buff 预制体缓存完成，共 {_buffPrefabCache.Count} 个");
+                if (Settings.debugMode) Debug.Log($"[PersistentPotionBuff] Buff 预制体缓存完成，共 {_buffPrefabCache.Count} 个");
             }
             catch (Exception e)
             {
@@ -101,7 +103,7 @@ namespace PersistentPotionBuff
                 {
                     if (CopyTemplateConfigFromDllDirectory())
                     {
-                        Debug.Log("[PersistentPotionBuff] 已从DLL目录复制模板配置文件");
+                        if (Settings.debugMode) Debug.Log("[PersistentPotionBuff] 已从DLL目录复制模板配置文件");
                     }
                     else
                     {
@@ -162,8 +164,10 @@ namespace PersistentPotionBuff
             void AddMapping(int itemId, int buffId)
             {
                 if (!ItemIdToBuffIdsMap.ContainsKey(itemId))
+                {
                     ItemIdToBuffIdsMap[itemId] = new HashSet<int>();
-                ItemIdToBuffIdsMap[itemId].Add(buffId);
+                    ItemIdToBuffIdsMap[itemId].Add(buffId);
+                }
             }
 
             AddMapping(0, 1201);      // 夜视
@@ -182,6 +186,8 @@ namespace PersistentPotionBuff
             AddMapping(1071, 1075);   // 毒抗
             AddMapping(1072, 1076);   // 空间抗性
             AddMapping(1247, 1019);   // 出血抗性
+            AddMapping(1400, 1206);   // 
+            AddMapping(1401, 1207);   // 
         }
     }
 }

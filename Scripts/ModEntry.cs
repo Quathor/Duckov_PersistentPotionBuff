@@ -23,7 +23,7 @@ namespace PersistentPotionBuff
 
         private bool _buffUpdateScheduled = false;
 
-        public static bool DebugMode = true; 
+        public static bool DebugMode; 
 
         private void OnEnable()
         {
@@ -65,6 +65,7 @@ namespace PersistentPotionBuff
                 _config = new ConfigManager();
                 _buffManager = new BuffManager(_config);
                 _config.Initialize();
+                DebugMode = _config.Settings.debugMode;
                 _config.CacheAllBuffPrefabs();
                 
                 _containerMonitor = new ContainerMonitor(_config);
@@ -89,11 +90,11 @@ namespace PersistentPotionBuff
             // 基地场景判断
             if (LevelConfig.IsBaseLevel && !_config.Settings.enableInBaseLevel)
             {
-                Debug.Log("[PersistentPotionBuff] 基地场景跳过初始化");
+                if (DebugMode) Debug.Log("[PersistentPotionBuff] 基地场景跳过初始化");
                 return;
             }
 
-            Debug.Log("[PersistentPotionBuff] 场景初始化");
+            if (DebugMode) Debug.Log("[PersistentPotionBuff] 场景初始化");
             StartCoroutine(BootstrapInitialization());
         }
 
@@ -140,8 +141,8 @@ namespace PersistentPotionBuff
             // 4. 执行一次统一的目录扫描
             _containerTracker.UpdateTrackedContainers(_config.Settings.targetContainerId, _config.Settings.additionalSlots);
             yield return new WaitForEndOfFrame();
-            _containerMonitor.RefreshAll(); //防止使用药剂不移除buff
-            try { Debug.Log("[PersistentPotionBuff] 刷新一次容器内容"); } catch {}
+            // _containerMonitor.RefreshAll(); 
+            // try { if (DebugMode) Debug.Log("[PersistentPotionBuff] 刷新一次容器内容"); } catch {}
 
             SubscribeAllTrackedSources();
         }

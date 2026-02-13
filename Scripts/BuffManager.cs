@@ -27,6 +27,12 @@ namespace PersistentPotionBuff
         private static FieldInfo _totalLifeTimeField;
         private static bool _fieldInfoInitialized = false;
 
+        // 优劣势Buff映射 <优势BuffID, 劣势BuffID>
+        private Dictionary<int, int> _superiorToInferiorMap = new Dictionary<int, int>
+        {
+            { 1207, 1206 }
+        };
+
         public BuffManager(ConfigManager config)
         {
             _config = config;
@@ -89,6 +95,51 @@ namespace PersistentPotionBuff
         {
             if (_activeModBuffIDs.Contains(buffId)) return;
 
+            // 检查是否被抑制的劣势Buff
+            bool suppressed = false;
+            foreach(var kvp in _superiorToInferiorMap)
+            {
+                if (kvp.Value == buffId)
+                {
+                    if (_activeModBuffIDs.Contains(kvp.Key))
+                    {
+                        suppressed = true;
+                        if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 劣势Buff {buffId} 被优势Buff {kvp.Key} 抑制，仅记录不激活");
+                    }
+                    break;
+                }
+            }
+
+            // 检查是否是优势Buff
+            if (_superiorToInferiorMap.TryGetValue(buffId, out int inferiorId))
+            {
+                if (_activeModBuffIDs.Contains(inferiorId))
+                {
+                    // 执行移除劣势Buff 
+                    RemoveBuffFromPlayerWithoutUntracking(inferiorId);
+                    if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 激活优势Buff {buffId} ，抑制劣势Buff {inferiorId}");
+                }
+            }
+
+            if (!suppressed)
+            {
+                ApplyBuffToPlayer(buffId);
+            }
+            
+            _activeModBuffIDs.Add(buffId);
+        }
+
+        private void RemoveBuffFromPlayerWithoutUntracking(int buffId)
+        {
+            CharacterMainControl player = CharacterMainControl.Main;
+            if (player != null)
+            {
+                player.RemoveBuff(buffId, false);
+            }
+        }
+
+        private void ApplyBuffToPlayer(int buffId)
+        {
             CharacterMainControl player = CharacterMainControl.Main;
             if (player == null) return;
 
@@ -96,7 +147,6 @@ namespace PersistentPotionBuff
             if (buffPrefab != null)
             {
                 player.AddBuff(buffPrefab, player);
-                _activeModBuffIDs.Add(buffId);
 
                 // 设置无限时长
                 var buffManager = player.GetBuffManager();
@@ -108,7 +158,7 @@ namespace PersistentPotionBuff
                         this.SetBuffInfiniteTime(addedBuff);
                     }
                 }
-                Debug.Log($"[PersistentPotionBuff] 添加Mod Buff: {buffId}");
+                if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 添加Mod Buff: {buffId}");
             }
         }
 
@@ -128,6 +178,17 @@ namespace PersistentPotionBuff
             {
                 _activeModBuffIDs.Remove(buffId);
                 return;
+            }
+
+            // 检查是否存在优劣势冲突
+            bool hasConflict = false;
+            int inferiorBuffId = -1;
+            if (_superiorToInferiorMap.TryGetValue(buffId, out inferiorBuffId))
+            {
+                if (_activeModBuffIDs.Contains(inferiorBuffId))
+                {
+                    hasConflict = true;
+                }
             }
 
             var currentBuff = buffManager.Buffs.FirstOrDefault(b => b.ID == buffId);
@@ -155,24 +216,51 @@ namespace PersistentPotionBuff
 
                     if (isVanillaUsage)
                     {
-                        // 重置为有限时长
-                        ResetBuffToFinite(currentBuff, buffId);
-                        Debug.Log($"[PersistentPotionBuff] 使用药剂， Buff {buffId} 重置为有限时长");
+                        if (hasConflict)
+                        {
+                             // 冲突状态下使用药剂：不再转为有限时长，而是移除优势Buff，激活劣势Buff
+                             player.RemoveBuff(buffId, false);
+                             ApplyBuffToPlayer(inferiorBuffId);
+                             if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 使用药剂(存在冲突)，移除优势Buff {buffId}，激活劣势Buff {inferiorBuffId}");
+                        }
+                        else
+                        {
+                            // 重置为有限时长
+                            ResetBuffToFinite(currentBuff, buffId);
+                            if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 使用药剂， Buff {buffId} 重置为有限时长");
+                        }
                     }
                     else
                     {
                         // 移除 Mod Buff
                         player.RemoveBuff(buffId, false);
-                        Debug.Log($"[PersistentPotionBuff] 移除Mod Buff: {buffId}");
+                        
+                        // 有冲突并且不是通过使用药剂减少，激活劣势Buff
+                        if (hasConflict)
+                        {
+                            ApplyBuffToPlayer(inferiorBuffId);
+                            if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 移除Mod Buff(冲突): {buffId} -> 激活 {inferiorBuffId}");
+                        }
+                        else
+                        {
+                            if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 移除Mod Buff: {buffId}");
+                        }
                     }
                 }
                 else
                 {
-                    Debug.Log($"[PersistentPotionBuff] 跳过移除 Buff {buffId}");
+                    if (ModBehaviour.DebugMode) Debug.Log($"[PersistentPotionBuff] 跳过移除 Buff {buffId}");
+                }
+            }
+            else
+            {
+                if (hasConflict)
+                {
+                     ApplyBuffToPlayer(inferiorBuffId);
                 }
             }
             
-            //  从 Mod 维护列表中删除
+            //  从维护列表中删除
             _activeModBuffIDs.Remove(buffId);
         }
 
@@ -181,11 +269,11 @@ namespace PersistentPotionBuff
             if (buff == null) return false;
             try
             {
-                // 检查 limitedLifeTime 是否为 false
+                // 检查 limitedLifeTime 为 false
                 bool limited = (bool)_limitedLifeTimeField.GetValue(buff);
                 if (limited) return false;
 
-                // 检查 totalLifeTime 是否足够大
+                // 检查 totalLifeTime
                 float totalTime = (float)_totalLifeTimeField.GetValue(buff);
                 return totalTime > 900000f;
             }

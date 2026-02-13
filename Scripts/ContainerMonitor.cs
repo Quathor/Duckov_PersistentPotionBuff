@@ -186,6 +186,7 @@ namespace PersistentPotionBuff
                     {
                         Action<Slot> sh = (s) =>
                         {
+                            UpdateChildItemSubscriptions(container);
                             if (CheckAndUpdateContainerSnapshot(container)) OnContentChanged?.Invoke();
                         };
                         info.ChildSlotHandlers[slot] = sh;
