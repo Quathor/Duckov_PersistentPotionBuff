@@ -1,5 +1,6 @@
 // 文件：ContainerMonitor.cs
-// 监控收纳包的内容变化，并提供物品统计功能。
+// 维护所有被追踪容器内的物品计数，
+// 在物品增删时触发局部或全局的统计刷新。
 
 using System;
 using System.Collections.Generic;

@@ -1,6 +1,6 @@
 // 文件：BuffManager.cs
-// 管理 Mod 自身激活的 Buff（添加/移除），记录最近使用的物品以区分原版Buff；
-// 在移除 Buff 时检查（移除 Mod 的无限时长 Buff，或在玩家使用药剂时重置为有限时长）。
+// 处理 Buff 的添加与移除（支持优劣映射与冲突处理），
+// 通过反射字段控制时长，区分Mod行为与玩家使用药剂的重置。
 
 using System;
 using System.Collections.Generic;

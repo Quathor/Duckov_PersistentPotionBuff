@@ -1,6 +1,6 @@
 // 文件：Config.cs
-// 负责加载并解析 `BuffMapping.json` 配置，将物品 ID 映射到 Mod Buff ID；
-// 运行时设置（目标收纳包 ID、触发所需物品计数、是否在基地生效、以及额外需要监听的槽位如 Medic）。
+// 处理默认硬编码配置与 JSON 文件的加载、合并及覆盖逻辑；
+// 在游戏启动时获取 Buff 预制体缓存，提供运行时映射查询与设置。
 
 using System;
 using System.Collections.Generic;
@@ -50,15 +50,23 @@ namespace PersistentPotionBuff
         public void Initialize()
         {
             ItemIdToBuffIdsMap.Clear();
+            if (!File.Exists(ConfigFilePath))
+            {
+                if (CopyTemplateConfigFromDllDirectory())
+                {
+                   Debug.Log("[PersistentPotionBuff] 已从DLL目录复制模板配置文件");
+                }
+            }
+            
+            LoadDefaultConfig();
+            
             if (LoadConfigFromFile())
             {
-                LoadDefaultConfig();
                 if (Settings.debugMode) Debug.Log($"[PersistentPotionBuff] 成功加载配置，共 {ItemIdToBuffIdsMap.Count} 个物品映射");
             }
             else
             {
-                Debug.LogWarning("[PersistentPotionBuff] 配置文件加载失败，使用默认配置");
-                LoadDefaultConfig();
+                Debug.LogWarning("[PersistentPotionBuff] 配置文件加载错误，仅使用默认配置");
             }
         }
 
@@ -85,7 +93,6 @@ namespace PersistentPotionBuff
                 Debug.LogError($"[PersistentPotionBuff] Buff 预制体缓存失败: {e.Message}");
             }
 
-            // 初始化 Buff 字段反射信息（缓存 FieldInfo，减少后续反射开销）
         }
 
         public Buff GetBuffPrefab(int buffId)
@@ -95,34 +102,32 @@ namespace PersistentPotionBuff
             return prefab;
         }
 
+        private void AddMapping(int itemId, int buffId)
+        {
+            if (buffId <= 0) return;
+            if (!ItemIdToBuffIdsMap.ContainsKey(itemId))
+            {
+                ItemIdToBuffIdsMap[itemId] = new HashSet<int>();
+            }
+            ItemIdToBuffIdsMap[itemId].Add(buffId);
+        }
+
         private bool LoadConfigFromFile()
         {
             try
             {
-                if (!File.Exists(ConfigFilePath))
-                {
-                    if (CopyTemplateConfigFromDllDirectory())
-                    {
-                        if (Settings.debugMode) Debug.Log("[PersistentPotionBuff] 已从DLL目录复制模板配置文件");
-                    }
-                    else
-                    {
-                        return false;
-                    }
-                }
+                if (!File.Exists(ConfigFilePath)) return false;
 
                 string json = File.ReadAllText(ConfigFilePath);
                 BuffMappingConfig config = JsonConvert.DeserializeObject<BuffMappingConfig>(json);
 
-                if (config == null || config.mappings == null) return false;
+                if (config == null) return false;
 
-                foreach (var entry in config.mappings)
+                if (config.mappings != null)
                 {
-                    if (entry.buffId > 0)
+                    foreach (var entry in config.mappings)
                     {
-                        if (!ItemIdToBuffIdsMap.ContainsKey(entry.itemId))
-                            ItemIdToBuffIdsMap[entry.itemId] = new HashSet<int>();
-                        ItemIdToBuffIdsMap[entry.itemId].Add(entry.buffId);
+                        AddMapping(entry.itemId, entry.buffId);
                     }
                 }
 
@@ -161,21 +166,13 @@ namespace PersistentPotionBuff
 
         private void LoadDefaultConfig()
         {
-            void AddMapping(int itemId, int buffId)
-            {
-                if (!ItemIdToBuffIdsMap.ContainsKey(itemId))
-                {
-                    ItemIdToBuffIdsMap[itemId] = new HashSet<int>();
-                    ItemIdToBuffIdsMap[itemId].Add(buffId);
-                }
-            }
-
             AddMapping(0, 1201);      // 夜视
             AddMapping(137, 1011);    // 加速
             AddMapping(398, 1012);    // 负重
             AddMapping(408, 1072);    // 电抗
             AddMapping(409, 1084);    // 痛觉抗性
             AddMapping(438, 1092);    // 热血
+            AddMapping(438, 2301);    // 抗寒
             AddMapping(797, 1013);    // 护甲
             AddMapping(798, 1014);    // 耐力
             AddMapping(800, 1015);    // 近战伤害
@@ -186,8 +183,8 @@ namespace PersistentPotionBuff
             AddMapping(1071, 1075);   // 毒抗
             AddMapping(1072, 1076);   // 空间抗性
             AddMapping(1247, 1019);   // 出血抗性
-            AddMapping(1400, 1206);   // 
-            AddMapping(1401, 1207);   // 
+            AddMapping(1400, 1206);   // Tagilla之力
+            AddMapping(1401, 1207);   // 米诺陶之力
         }
     }
 }

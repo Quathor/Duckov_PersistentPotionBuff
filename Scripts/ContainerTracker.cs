@@ -1,6 +1,6 @@
 // 文件：ContainerTracker.cs
-// 负责在玩家背包、宠物背包与扩展槽位（Medic）中发现目标收纳包并管理其生命周期（添加/移除）；
-// 向 `ContainerMonitor` 注册/注销容器，并提供 `GetAllTrackedSources()` 以统一枚举可订阅的来源。
+// 动态扫描玩家背包、宠物背包及特定槽位中的目标收纳包，
+// 提供统一的事件源，当容器列表或容器父级变更时触发更新。
 
 using System;
 using System.Collections.Generic;
@@ -311,7 +311,7 @@ namespace PersistentPotionBuff
             {
                 yield return ("PetInventory", PetProxy.PetInventory, null);
             }
-            // Medic等额外槽位
+            // 额外槽位
             if (CharacterMainControl.Main != null && CharacterMainControl.Main.CharacterItem != null && CharacterMainControl.Main.CharacterItem.Slots != null)
             {
                 foreach (var slot in CharacterMainControl.Main.CharacterItem.Slots)

@@ -1,10 +1,10 @@
 // 文件：ModEntry.cs
-// Mod 入口：初始化配置与 Buff 缓存，创建并连接 `ContainerTracker` / `ContainerMonitor` / `BuffManager`。
-// 统一订阅并监听玩家背包、宠物背包与扩展槽位，按帧末合并触发 Buff 更新，
-// 并负责物品使用事件的记录转发与订阅管理（Subscribe/UnsubscribeAllTrackedSources）。
+// 在游戏启动时初始化配置与缓存，场景初始化时连接监听器。
+// 监听容器变更事件，用缓冲队列管理Buff的添加和删除。
 
 using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using Duckov.Modding;
@@ -19,11 +19,29 @@ namespace PersistentPotionBuff
         private ContainerTracker _containerTracker;
         private ContainerMonitor _containerMonitor;
         private BuffManager _buffManager;
-
+        private Queue<Action> _buffQueue = new Queue<Action>();
+        private Coroutine _buffQueueCoroutine;
 
         private bool _buffUpdateScheduled = false;
 
         public static bool DebugMode; 
+
+        protected override void OnAfterSetup()
+        {
+            base.OnAfterSetup();
+            // 游戏启动时加载配置及缓存预制体
+            if (_config == null)
+            {
+                _config = new ConfigManager();
+                _config.Initialize();
+                DebugMode = _config.Settings.debugMode;
+                _config.CacheAllBuffPrefabs();
+
+                _buffManager = new BuffManager(_config);
+                _containerMonitor = new ContainerMonitor(_config);
+                _containerTracker = new ContainerTracker(_config, _containerMonitor);
+            }
+        }
 
         private void OnEnable()
         {
@@ -32,10 +50,20 @@ namespace PersistentPotionBuff
             
             Item.onUseStatic -= OnItemUsed;
             Item.onUseStatic += OnItemUsed;
+
+            if (_buffQueueCoroutine != null) StopCoroutine(_buffQueueCoroutine);
+            _buffQueueCoroutine = StartCoroutine(ProcessBuffQueue());
         }
 
         private void OnDisable()
         {
+            if (_buffQueueCoroutine != null) 
+            {
+                StopCoroutine(_buffQueueCoroutine);
+                _buffQueueCoroutine = null;
+            }
+            _buffQueue.Clear();
+
             LevelManager.OnLevelInitialized -= OnLevelInitialized;
             Item.onUseStatic -= OnItemUsed;
 
@@ -60,16 +88,10 @@ namespace PersistentPotionBuff
 
         private void OnLevelInitialized()
         {
+            // 确保 Config 已加载
             if (_config == null)
             {
-                _config = new ConfigManager();
-                _buffManager = new BuffManager(_config);
-                _config.Initialize();
-                DebugMode = _config.Settings.debugMode;
-                _config.CacheAllBuffPrefabs();
-                
-                _containerMonitor = new ContainerMonitor(_config);
-                _containerTracker = new ContainerTracker(_config, _containerMonitor);
+                 OnAfterSetup();
             }
 
             if (_containerTracker != null)
@@ -141,8 +163,6 @@ namespace PersistentPotionBuff
             // 4. 执行一次统一的目录扫描
             _containerTracker.UpdateTrackedContainers(_config.Settings.targetContainerId, _config.Settings.additionalSlots);
             yield return new WaitForEndOfFrame();
-            // _containerMonitor.RefreshAll(); 
-            // try { if (DebugMode) Debug.Log("[PersistentPotionBuff] 刷新一次容器内容"); } catch {}
 
             SubscribeAllTrackedSources();
         }
@@ -191,17 +211,58 @@ namespace PersistentPotionBuff
                 }
             }
 
-            // 3. 差异更新
+            // 3. 差异更新 (改为添加到队列)
             var currentBuffs = _buffManager.GetActiveBuffs();
             
+            // 需要添加的Buff
             foreach (var buffId in desiredBuffs)
             {
-                if (!currentBuffs.Contains(buffId)) _buffManager.AddBuff(buffId);
+                if (!currentBuffs.Contains(buffId))
+                {
+                    EnqueueBuffAction(buffId, () => _buffManager.AddBuff(buffId), true);
+                }
             }
 
+            // 需要移除的Buff
+            var buffsToRemove = new System.Collections.Generic.List<int>();
             foreach (var buffId in currentBuffs)
             {
-                if (!desiredBuffs.Contains(buffId)) _buffManager.RemoveBuff(buffId);
+                if (!desiredBuffs.Contains(buffId))
+                {
+                    buffsToRemove.Add(buffId);
+                }
+            }
+            
+            buffsToRemove.Reverse();
+
+            foreach (var buffId in buffsToRemove)
+            {
+                EnqueueBuffAction(buffId, () => _buffManager.RemoveBuff(buffId), false);
+            }
+        }
+
+        private void EnqueueBuffAction(int buffId, Action action, bool isAdd)
+        {
+            _buffQueue.Enqueue(action);
+        }
+
+        private IEnumerator ProcessBuffQueue()
+        {
+            while (true)
+            {
+                if (_buffQueue.Count > 0)
+                {
+                    var action = _buffQueue.Dequeue();
+                    try
+                    {
+                        action?.Invoke();
+                    }
+                    catch (Exception ex)
+                    {
+                       if (DebugMode) Debug.LogError($"[PersistentPotionBuff] Error executing buff action: {ex.Message}");
+                    }
+                }
+                yield return null; // 等待下一帧
             }
         }
 
@@ -243,13 +304,11 @@ namespace PersistentPotionBuff
         {
             bool changed = false;
             try { changed = _containerTracker?.HandleOwnerChange(inv, idx) ?? false; } catch {}
-            // if (changed) try { Debug.Log($"[PersistentPotionBuff] 检测到收纳包的添加或移除，进行更新"); } catch {}
         }
         private void OnAnySlotChanged(Slot slot)
         {
             bool changed = false;
             try { changed = _containerTracker?.HandleOwnerChange(slot) ?? false; } catch {}
-            // if (changed) try { Debug.Log($"[PersistentPotionBuff] 检测到收纳包的添加或移除，进行更新"); } catch {}
         }
     }
 }
