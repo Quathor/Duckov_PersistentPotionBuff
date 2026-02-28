@@ -12,14 +12,14 @@
 {
   "mappings": [
     {
-      "itemId": 137,
-      "buffId": 1011
+      "itemId": 137,"buffId": 1011
     }
   ],
   "settings": {
     "targetContainerId": 882,
     "requiredItemCount": 3,
     "enableInBaseLevel": false
+    "debugMode": false 
   }
 }
 ```
@@ -42,6 +42,7 @@
 | `targetContainerId` | 整数   | `882`   | 目标容器的物品ID       |
 | `requiredItemCount` | 整数   | `3`     | 触发Buff所需的药剂数量 |
 | `enableInBaseLevel` | 布尔值 | `false` | 是否在基地场景启用Buff |
+| `debugMode` | 布尔值 | `false` | 是否打印日志 |
 
 ## 📝 默认支持的药剂列表
 
@@ -53,6 +54,7 @@
 | 408    | 1072    | 1072_Buff_ElecResistShort           | 电击抵抗   |
 | 409    | 1084    | 1084_Buff_PainResistLong            | 疼痛抵抗   |
 | 438    | 1092    | 1092_Buff_Injector_HotBlood_Trigger | 热血触发   |
+| 438    | 2301    | 2301_Buff_ColdResist                | 抗寒       |
 | 797    | 1013    | 1013_Buff_InjectorArmor             | 护甲强化   |
 | 798    | 1014    | 1014_Buff_InjectorStamina           | 耐力提升   |
 | 800    | 1015    | 1015_Buff_InjectorMeleeDamage       | 近战伤害   |
@@ -63,6 +65,8 @@
 | 1071   | 1075    | 1075_Buff_PoisonResistShort         | 毒素抵抗   |
 | 1072   | 1076    | 1076_Buff_SpaceResistShort          | 空间抵抗   |
 | 1247   | 1019    | 1019_buff_Injector_BleedResist      | 流血抵抗   |
+| 1400   | 1206    | 1206_Buff_Tagilla                   | Tagilla之力|
+| 1401   | 1207    | 1207_Buff_Tagilla_Basaka            | 米诺陶之力 |
 
 ## 📝 医疗扩展的药剂列表
 
