@@ -33,7 +33,7 @@ namespace PersistentPotionBuff
 
         // 追踪的 Medic 槽位
         private Dictionary<string, Slot> _trackedSlots = new Dictionary<string, Slot>();
-        private int _targetContainerId = -1;
+        private List<int> _targetContainerId = new List<int>();
 
         public ContainerTracker(ConfigManager config, ContainerMonitor monitor) 
         { 
@@ -61,7 +61,7 @@ namespace PersistentPotionBuff
         }
 
         // 场景初始化时完整扫描
-        public void UpdateTrackedContainers(int targetContainerId, List<string> additionalSlots)
+        public void UpdateTrackedContainers(List<int> targetContainerId, List<string> additionalSlots)
         {
             _targetContainerId = targetContainerId;
             // 1. 在玩家/宠物/以及指定的 Medic 槽位 中查找目标收纳包容器
@@ -100,7 +100,7 @@ namespace PersistentPotionBuff
             if (changed) OnContainerListChanged?.Invoke();
         }
 
-        private List<ContainerLocation> FindContainersOnPlayer(int targetID, List<string> additionalSlots)
+        private List<ContainerLocation> FindContainersOnPlayer(List<int> targetIDs, List<string> additionalSlots)
         {
             List<ContainerLocation> result = new List<ContainerLocation>();
 
@@ -111,7 +111,7 @@ namespace PersistentPotionBuff
                     for (int i = 0; i < inv.Capacity; i++)
                     {
                         var it = inv.GetItemAt(i);
-                        ScanItemForContainer(it, targetID, result, parentOwner: new ParentOwner { Inventory = inv });
+                        ScanItemForContainer(it, targetIDs, result, parentOwner: new ParentOwner { Inventory = inv });
                     }
             }
 
@@ -121,7 +121,7 @@ namespace PersistentPotionBuff
                 for (int i = 0; i < PetProxy.PetInventory.Capacity; i++)
                 {
                     var it = PetProxy.PetInventory.GetItemAt(i);
-                    ScanItemForContainer(it, targetID, result, parentOwner: new ParentOwner { Inventory = PetProxy.PetInventory });
+                    ScanItemForContainer(it, targetIDs, result, parentOwner: new ParentOwner { Inventory = PetProxy.PetInventory });
                 }
             }
 
@@ -141,7 +141,7 @@ namespace PersistentPotionBuff
 
                         if (slot.Content != null)
                         {
-                            ScanItemForContainer(slot.Content, targetID, result, parentOwner: new ParentOwner { Slot = slot });
+                            ScanItemForContainer(slot.Content, targetIDs, result, parentOwner: new ParentOwner { Slot = slot });
                         }
                     }
                 }
@@ -150,10 +150,10 @@ namespace PersistentPotionBuff
             return result;
         }
 
-        private void ScanItemForContainer(Item item, int targetID, List<ContainerLocation> result, ParentOwner parentOwner = default)
+        private void ScanItemForContainer(Item item, List<int> targetIDs, List<ContainerLocation> result, ParentOwner parentOwner = default)
         {
             if (item == null) return;
-            if (item.TypeID == targetID)
+            if (targetIDs != null && targetIDs.Contains(item.TypeID))
             {
                 result.Add(new ContainerLocation { Container = item, ParentOwner = parentOwner });
             }
@@ -191,7 +191,7 @@ namespace PersistentPotionBuff
             return HandleSlotChanged(slot, _targetContainerId);
         }
 
-        public bool HandleInventoryChanged(Inventory inventory, int index, int targetID)
+        public bool HandleInventoryChanged(Inventory inventory, int index, List<int> targetIDs)
         {
             try
             {
@@ -200,7 +200,7 @@ namespace PersistentPotionBuff
                 for (int i = 0; i < inventory.Capacity; i++)
                 {
                     var it = inventory[i];
-                    if (it != null && it.TypeID == targetID) found.Add(it);
+                    if (it != null && targetIDs != null && targetIDs.Contains(it.TypeID)) found.Add(it);
                 }
 
                 bool changed = false;
@@ -234,7 +234,7 @@ namespace PersistentPotionBuff
             catch { return false; }
         }
 
-        public bool HandleSlotChanged(Slot slot, int targetID)
+        public bool HandleSlotChanged(Slot slot, List<int> targetIDs)
         {
             try
             {
@@ -242,7 +242,7 @@ namespace PersistentPotionBuff
                 Item content = slot.Content;
                 bool changed = false;
 
-                if (content != null && content.TypeID == targetID)
+                if (content != null && targetIDs != null && targetIDs.Contains(content.TypeID))
                 {
                     if (!_trackedContainers.ContainsKey(content)) 
                     { 

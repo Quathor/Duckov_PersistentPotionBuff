@@ -12,6 +12,31 @@ using Newtonsoft.Json;
 
 namespace PersistentPotionBuff
 {
+    public class SingleOrArrayConverter<T> : JsonConverter
+    {
+        public override bool CanConvert(Type objectType)
+        {
+            return objectType == typeof(List<T>);
+        }
+
+        public override object ReadJson(JsonReader reader, Type objectType, object existingValue, JsonSerializer serializer)
+        {
+            if (reader.TokenType == JsonToken.StartArray)
+            {
+                return serializer.Deserialize<List<T>>(reader);
+            }
+            T single = serializer.Deserialize<T>(reader);
+            return new List<T> { single };
+        }
+
+        public override bool CanWrite => false;
+
+        public override void WriteJson(JsonWriter writer, object value, JsonSerializer serializer)
+        {
+            throw new NotImplementedException();
+        }
+    }
+
     [Serializable]
     public class BuffMappingConfig
     {
@@ -29,7 +54,8 @@ namespace PersistentPotionBuff
     [Serializable]
     public class ConfigSettings
     {
-        public int targetContainerId = 882;
+        [JsonConverter(typeof(SingleOrArrayConverter<int>))]
+        public List<int> targetContainerId = new List<int> { 882 };
         public int requiredItemCount = 3;
         public bool enableInBaseLevel = false;
         // 扩展槽位mod的位置（例如 Medic）
@@ -166,7 +192,6 @@ namespace PersistentPotionBuff
 
         private void LoadDefaultConfig()
         {
-            AddMapping(0, 1201);      // 夜视
             AddMapping(137, 1011);    // 加速
             AddMapping(398, 1012);    // 负重
             AddMapping(408, 1072);    // 电抗
